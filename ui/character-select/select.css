@@ -1,0 +1,82 @@
+/* Character select overlay. Everything is namespaced under .cs so it can't leak into the game. */
+.cs { --p1: #ff4d4d; --p2: #4da3ff; --gold: #f2c230;
+      position: fixed; inset: 0; z-index: 20; display: none; flex-direction: column; align-items: center;
+      justify-content: center; gap: clamp(8px, 2vh, 22px); padding: 12px; box-sizing: border-box; overflow-y: auto;
+      color: #fff; font-family: system-ui, sans-serif; text-align: center;
+      background: radial-gradient(ellipse at center, rgba(10,8,20,.55), rgba(0,0,0,.92)),
+                  var(--cs-bg, none) center / cover #07060c; }
+.cs.is-open { display: flex; animation: cs-fade .35s ease; }
+@keyframes cs-fade { from { opacity: 0; } }
+
+.cs__title { margin: 0; font-size: clamp(22px, 4.5vh, 44px); letter-spacing: .12em; font-weight: 900;
+             text-shadow: 0 3px 0 #000, 0 0 24px rgba(242,194,48,.5); }
+.cs__main { display: grid; grid-template-columns: minmax(200px, 280px) auto minmax(200px, 280px);
+            gap: clamp(12px, 3vw, 40px); align-items: center; }
+
+/* ---- roster grid ------------------------------------------------------------------------ */
+.cs__grid { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(2, 1fr);
+            gap: clamp(8px, 1.6vh, 16px); }
+.cs__tile { position: relative; width: clamp(104px, 17vh, 168px); aspect-ratio: 1; cursor: pointer; overflow: hidden;
+            border: 3px solid #4a4658; border-radius: 10px; background: #1b1826;
+            transition: transform .15s ease, border-color .15s ease, box-shadow .15s ease, filter .15s ease;
+            filter: brightness(.75) saturate(.8); outline: none; }
+.cs__tile:hover { transform: translateY(-3px) scale(1.04); filter: none; border-color: #bbb; }
+.cs__tile canvas, .cs__tile img { width: 100%; height: 100%; display: block; object-fit: contain; }
+.cs__tile-name { position: absolute; left: 0; right: 0; bottom: 0; padding: 4px 2px; font-size: 12px; font-weight: 700;
+                 background: linear-gradient(transparent, rgba(0,0,0,.85)); text-shadow: 0 1px 2px #000; }
+.cs__tile.is-p1 { border-color: var(--p1); box-shadow: 0 0 18px var(--p1); filter: none; transform: scale(1.05); }
+.cs__tile.is-p2 { border-color: var(--p2); box-shadow: 0 0 18px var(--p2); filter: none; transform: scale(1.05); }
+.cs__tile.is-p1.is-p2 { border-image: linear-gradient(90deg, var(--p1) 50%, var(--p2) 50%) 1; border-radius: 0;
+                        box-shadow: -8px 0 18px var(--p1), 8px 0 18px var(--p2); }
+.cs__tile.is-locked { animation: cs-lock .5s ease; }
+@keyframes cs-lock { 30% { transform: scale(1.12); filter: brightness(1.8); } }
+.cs__tag { position: absolute; top: 4px; font-size: 11px; font-weight: 900; padding: 1px 6px; border-radius: 4px; color: #000; }
+.cs__tag--p1 { left: 4px; background: var(--p1); }
+.cs__tag--p2 { right: 4px; background: var(--p2); }
+.cs__tag.is-ready::after { content: " ✔"; }
+
+/* ---- preview panels --------------------------------------------------------------------- */
+.cs__panel { --accent: var(--p1); display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 12px;
+             border: 2px solid var(--accent); border-radius: 12px; background: rgba(10,8,20,.7);
+             box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 40%, transparent); transition: box-shadow .3s; }
+.cs__panel[data-player="1"] { --accent: var(--p2); }
+.cs__panel.is-ready { box-shadow: 0 0 34px var(--accent); }
+.cs__who { font-size: 13px; font-weight: 900; letter-spacing: .15em; color: var(--accent); }
+.cs__preview { height: clamp(120px, 28vh, 280px); width: auto; max-width: 100%; aspect-ratio: 280 / 308; display: block; }
+.cs__panel.is-swap .cs__preview, .cs__panel.is-swap .cs__name { animation: cs-pop .28s ease; }
+@keyframes cs-pop { from { opacity: 0; transform: translateX(-14px) scale(.96); } }
+.cs__panel[data-player="1"].is-swap .cs__preview { animation-name: cs-pop-r; }
+@keyframes cs-pop-r { from { opacity: 0; transform: translateX(14px) scale(.96); } }
+.cs__name { margin: 0; font-size: 22px; font-weight: 900; }
+.cs__epithet { margin: 0; font-size: 12px; color: var(--gold); font-style: italic; }
+.cs__bio { margin: 0; font-size: 12px; line-height: 1.4; color: #cfcbe0; min-height: 4.2em; }
+.cs__special { margin: 0; font-size: 11px; letter-spacing: .08em; color: #aaa; }
+.cs__special b { color: #ffc400; }
+.cs__stats { width: 100%; display: grid; grid-template-columns: auto 1fr; gap: 3px 8px; font-size: 11px; text-align: left; }
+.cs__bar { height: 8px; align-self: center; background: #2a2638; border-radius: 4px; overflow: hidden; }
+.cs__bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .35s ease; }
+.cs__badge { height: 22px; font-size: 13px; font-weight: 900; letter-spacing: .1em; color: var(--accent);
+             opacity: .55; transition: opacity .2s; }
+.cs__panel.is-ready .cs__badge { opacity: 1; animation: cs-blink 1s ease infinite; }
+@keyframes cs-blink { 50% { text-shadow: 0 0 14px var(--accent); } }
+
+/* ---- footer ----------------------------------------------------------------------------- */
+.cs__fight { font: 900 clamp(18px, 3.4vh, 30px) system-ui, sans-serif; letter-spacing: .15em; padding: .45em 1.6em;
+             color: #000; background: var(--gold); border: 0; border-radius: 8px; cursor: pointer;
+             box-shadow: 0 5px 0 #8a6a00; transition: transform .1s, opacity .2s, filter .2s; }
+.cs__fight:disabled { opacity: .35; cursor: not-allowed; filter: grayscale(1); }
+.cs__fight:not(:disabled) { animation: cs-pulse .9s ease infinite alternate; }
+.cs__fight:not(:disabled):active { transform: translateY(4px); box-shadow: 0 1px 0 #8a6a00; }
+@keyframes cs-pulse { to { transform: scale(1.06); } }
+.cs__status { min-height: 1.4em; font-size: 14px; color: #ddd; }
+.cs__hint { margin: 0; font-size: 12px; color: #aaa; line-height: 1.7; }
+.cs kbd { background: #2a2630; border-radius: 4px; padding: 1px 6px; }
+
+/* ---- narrow screens: panels collapse under the grid ------------------------------------- */
+@media (max-width: 760px) {
+  .cs { overflow-y: auto; justify-content: flex-start; }
+  .cs__main { grid-template-columns: 1fr 1fr; }
+  .cs__grid { grid-column: 1 / -1; grid-row: 1; justify-self: center; }
+  .cs__bio { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { .cs *, .cs { animation: none !important; transition: none !important; } }
