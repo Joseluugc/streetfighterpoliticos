@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Street Fighter - Versión Políticos (prototipo Canvas)</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #000; color: #eee;
+               font-family: system-ui, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+  /* The canvas fills the browser window (letterboxed to keep the 1024x572 proportions) */
+  canvas { width: min(100vw, calc(100vh * 1024 / 572)); height: auto; aspect-ratio: 1024 / 572;
+           background: #000; image-rendering: auto; cursor: default; }
+  .help { position: fixed; left: 0; right: 0; bottom: 0; margin: 0; padding: 8px 12px; font-size: 13px;
+          line-height: 1.7; text-align: center; background: rgba(0,0,0,.65); pointer-events: none;
+          animation: fadeHelp 1s ease 12s forwards; }
+  @keyframes fadeHelp { to { opacity: 0; } }
+  kbd { background: #2a2630; border-radius: 4px; padding: 1px 6px; }
+  #fs { position: fixed; top: 8px; right: 8px; z-index: 5; background: rgba(0,0,0,.6); color: #fff;
+        border: 1px solid #888; border-radius: 6px; padding: 6px 10px; font: 13px system-ui, sans-serif; cursor: pointer; }
+  #fs:hover { background: rgba(60,60,60,.85); }
+  :fullscreen #fs { display: none; }
+</style>
+</head>
+<body>
+<canvas id="game" width="1024" height="572"></canvas>
+<button id="fs" type="button" title="Pantalla completa (Enter)">⛶ Pantalla completa (Enter)</button>
+<p class="help"><b>P1</b> <kbd>A</kbd><kbd>D</kbd> mover · <kbd>W</kbd> saltar · <kbd>F</kbd> puño · <kbd>G</kbd> patada · <kbd>H</kbd> especial &nbsp;|&nbsp;
+   <b>P2</b> <kbd>←</kbd><kbd>→</kbd> mover · <kbd>↑</kbd> saltar · <kbd>K</kbd> puño · <kbd>L</kbd> patada · <kbd>Ñ</kbd> (o <kbd>;</kbd>) especial<br>
+   <kbd>M</kbd> música on/off · <kbd>B</kbd> cajas de golpe · <kbd>R</kbd> reiniciar · <kbd>Enter</kbd> pantalla completa</p>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------------------------
+// Assets (paths relative to this file). Serve the folder (python3 -m http.server) so the gray
+// sheet background can be removed; opened straight from disk the sprites still work, but the
+// browser blocks pixel access and the gray background stays visible.
+// ---------------------------------------------------------------------------------------------
+const BG_SRC    = "assets/spanish_parliament_background.png";
+const SHEET_SRC = "assets/political_fighter_spritesheet.png";
+
+const W = 1024, H = 572, FLOOR_Y = 520;
+const STEP = 1 / 60, MAX_STEPS = 5;
+const SCALE = 0.72;               // sprite size relative to the sheet
+const KEY_TOLERANCE = 28;         // how close to the sheet's gray counts as background
+
+// 9 frames measured from the sheet: x, y, w, h, anchorX (body centre), footY (floor line)
+const FRAMES = [
+  { x: 43,  y: 23,  w: 161, h: 277, ax: 82,  fy: 277 },  // 1 idle A
+  { x: 245, y: 44,  w: 156, h: 253, ax: 87,  fy: 253 },  // 2 idle B
+  { x: 431, y: 46,  w: 158, h: 247, ax: 117, fy: 247 },  // 3 walk
+  { x: 610, y: 19,  w: 155, h: 248, ax: 77,  fy: 248 },  // 4 jump
+  { x: 765, y: 79,  w: 238, h: 217, ax: 119, fy: 217 },  // 5 fall
+  { x: 30,  y: 318, w: 201, h: 239, ax: 89,  fy: 239 },  // 6 punch
+  { x: 256, y: 318, w: 206, h: 239, ax: 51,  fy: 239 },  // 7 kick
+  { x: 462, y: 335, w: 148, h: 222, ax: 100, fy: 222 },  // 8 guard (unused here)
+  { x: 644, y: 331, w: 210, h: 226, ax: 110, fy: 226 },  // 9 special cast pose
+];
+// The flaming paper scroll drawn beside pose 9: it is the "Ley de Vivienda" projectile sprite.
+const SCROLL = { x: 855, y: 356, w: 135, h: 70 };
+const SCROLL_SCALE = 0.85;
+
+// Gameplay numbers (pixels, pixels/update, updates)
+const WALK_SPEED = 4, JUMP_V = -14, GRAVITY = 0.7;
+const HURT = { w: 80, h: 190 };
+const HITSTUN = 15, IDLE_HOLD = 30, MAX_HEALTH = 100;
+const ATTACKS = {
+  punch: { frame: 5, startup: 4, active: 3, recovery: 8,  damage: 5, push: 16, box: { w: 70,  h: 40, ox: 30, oy: -150 } },
+  kick:  { frame: 6, startup: 7, active: 4, recovery: 12, damage: 8, push: 24, box: { w: 100, h: 45, ox: 30, oy: -95 } },
+};
+const SPECIAL = { frame: 8, startup: 12, recovery: 18, spawnX: 80, spawnY: -140,
+                  speed: 9, life: 90, damage: 10, push: 20, box: { w: 70, h: 45 } };
+
+// ---------------------------------------------------------------------------------------------
+// Sound: everything is synthesised with the Web Audio API (no audio files needed).
+// Music is an original arcade-rock chiptune loop (square lead, driving bass, rock drum kit).
+// ---------------------------------------------------------------------------------------------
+const Sound = (() => {
+  let ac = null, master, musicGain, sfxGain, noiseBuf;
+  let started = false, musicOn = true, timer = null, step = 0, nextTime = 0;
+  let fileTrack = null;                                    // user-supplied fight music (replaces the synth loop)
+  let pendingTrack = null;                                 // loaded but autoplay was refused: retry on next key
+  const TRACKS = ["mysong.mp3", "assets/music/mysong.mp3", "mysong.ogg", "mysong.wav",
+                  "assets/music/guile_theme.mp3", "assets/music/guile_theme.ogg", "assets/music/guile_theme.wav"];
+  const TRACK_VOLUME = 0.55;
+  const BPM = 150, STEP_T = 60 / BPM / 4;                  // sixteenth-note length in seconds
+  const freq = m => 440 * Math.pow(2, (m - 69) / 12);
+  const rnd = (a, b) => a + Math.random() * (b - a);
+
+  // Four bars (Am - F - G - E), 16 steps each. Lead: step -> [midi note, length in steps]
+  const ROOTS = [45, 41, 43, 40];
+  const LEAD = [
+    { 0: [69, 2], 2: [72, 2], 4: [76, 4], 8: [74, 2], 10: [72, 2], 12: [69, 4] },
+    { 0: [69, 2], 2: [72, 2], 4: [77, 4], 8: [76, 2], 10: [72, 2], 12: [69, 4] },
+    { 0: [71, 2], 2: [74, 2], 4: [79, 4], 8: [77, 2], 10: [74, 2], 12: [71, 4] },
+    { 0: [68, 2], 2: [71, 2], 4: [76, 4], 8: [74, 2], 10: [71, 2], 12: [76, 2], 14: [80, 2] },
+  ];
+
+  function env(g, t, a, d, vol) {
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(vol, 0.0002), t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + d);
+  }
+  function tone({ f0, f1, dur, type = "square", vol = 0.3, dest, t, a = 0.004 }) {
+    t = t ?? ac.currentTime;
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    if (f1) o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t + dur);
+    env(g, t, a, dur, vol);
+    o.connect(g); g.connect(dest || sfxGain);
+    o.start(t); o.stop(t + a + dur + 0.03);
+  }
+  function noise({ dur, type = "bandpass", f0, f1, q = 1, vol = 0.3, dest, t, a = 0.002 }) {
+    t = t ?? ac.currentTime;
+    const s = ac.createBufferSource(), f = ac.createBiquadFilter(), g = ac.createGain();
+    s.buffer = noiseBuf;
+    f.type = type; f.Q.value = q; f.frequency.setValueAtTime(f0, t);
+    if (f1) f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    env(g, t, a, dur, vol);
+    s.connect(f); f.connect(g); g.connect(dest || sfxGain);
+    s.start(t, rnd(0, 0.5)); s.stop(t + a + dur + 0.03);
+  }
+
+  // ---- music --------------------------------------------------------------------------------
+  function playStep(s, t) {
+    const bar = (s >> 4) & 3, i = s & 15, m = musicGain;
+    // drums: kick, snare on 2 & 4, eighth-note hi-hats, open hat before the bar line
+    if (i === 0 || i === 8 || i === 10 || (bar === 3 && i === 6)) tone({ f0: 150, f1: 42, dur: 0.16, type: "sine", vol: 0.8, dest: m, t });
+    if (i === 4 || i === 12) {
+      noise({ dur: 0.13, type: "bandpass", f0: 1900, q: 0.8, vol: 0.45, dest: m, t });
+      tone({ f0: 220, f1: 110, dur: 0.09, type: "triangle", vol: 0.3, dest: m, t });
+    }
+    if (i % 2 === 0) noise({ dur: i === 14 ? 0.11 : 0.04, type: "highpass", f0: 7500, vol: i === 14 ? 0.16 : 0.11, dest: m, t });
+    // driving eighth-note bass with a fifth and an octave pop
+    if (i % 2 === 0) {
+      const root = ROOTS[bar], n = i === 6 ? root + 7 : i === 14 ? root + 12 : root;
+      tone({ f0: freq(n), dur: STEP_T * 1.7, type: "sawtooth", vol: 0.2, dest: m, t, a: 0.003 });
+    }
+    // heroic square lead
+    const L = LEAD[bar][i];
+    if (L) {
+      const dur = L[1] * STEP_T * 0.92;
+      tone({ f0: freq(L[0]), dur, type: "square", vol: 0.13, dest: m, t });
+      tone({ f0: freq(L[0]) * 1.005, dur, type: "square", vol: 0.06, dest: m, t });   // chorus
+    }
+  }
+  function schedule() {
+    while (nextTime < ac.currentTime + 0.15) {
+      if (!fileTrack) playStep(step, nextTime);          // synth loop only when no music file is loaded
+      step = (step + 1) % 64;
+      nextTime += STEP_T;
+    }
+  }
+
+  // Looks for a music file in assets/music/ (tried in order). The first one that loads plays on loop
+  // and silences the built-in loop. If none exists, the built-in loop keeps playing.
+  function loadFileMusic(i = 0) {
+    if (i >= TRACKS.length) return;
+    const a = new Audio();
+    a.loop = true; a.volume = TRACK_VOLUME; a.preload = "auto";
+    a.addEventListener("error", () => loadFileMusic(i + 1), { once: true });
+    a.addEventListener("canplaythrough", () => {
+      if (fileTrack) return;
+      fileTrack = a; a.muted = !musicOn;
+      a.play().catch(() => { fileTrack = null; pendingTrack = a; });   // autoplay refused -> retry on next key
+    }, { once: true });
+    a.src = TRACKS[i];
+  }
+
+  // ---- public API ---------------------------------------------------------------------------
+  return {
+    get started() { return started; },
+    get musicOn() { return musicOn; },
+    init() {
+      if (started) {
+        if (ac.state === "suspended") ac.resume();
+        if (pendingTrack) {                              // a user gesture is happening now: try the song again
+          const a = pendingTrack; pendingTrack = null;
+          a.play().then(() => { fileTrack = a; a.muted = !musicOn; }).catch(() => { pendingTrack = a; });
+        }
+        return;
+      }
+      try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { return; }
+      master = ac.createGain(); master.gain.value = 0.85; master.connect(ac.destination);
+      musicGain = ac.createGain(); musicGain.gain.value = musicOn ? 0.34 : 0; musicGain.connect(master);
+      sfxGain = ac.createGain(); sfxGain.gain.value = 0.9; sfxGain.connect(master);
+      noiseBuf = ac.createBuffer(1, ac.sampleRate, ac.sampleRate);
+      const d = noiseBuf.getChannelData(0);
+      for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      started = true;
+      nextTime = ac.currentTime + 0.1;
+      timer = setInterval(schedule, 25);
+      loadFileMusic();
+    },
+    get usingFile() { return !!fileTrack; },
+    toggleMusic() {
+      musicOn = !musicOn;
+      if (fileTrack) fileTrack.muted = !musicOn;
+      if (started) musicGain.gain.setTargetAtTime(musicOn ? 0.34 : 0, ac.currentTime, 0.05);
+    },
+    // Swings: lighter whoosh for punches, deeper and longer for kicks
+    swing(kind) {
+      if (!started) return;
+      if (kind === "punch") noise({ dur: 0.11, f0: rnd(900, 1100), f1: rnd(2400, 2900), q: 1.2, vol: 0.16 });
+      else noise({ dur: 0.18, f0: rnd(350, 450), f1: rnd(1300, 1700), q: 0.9, vol: 0.22 });
+    },
+    // Impacts: three clearly different sounds, with random pitch so repeats never sound identical
+    hit(kind) {
+      if (!started) return;
+      if (kind === "punch") {                       // sharp "smack"
+        noise({ dur: 0.07, type: "bandpass", f0: rnd(1500, 2100), q: 1.4, vol: 0.55 });
+        tone({ f0: rnd(210, 260), f1: 70, dur: 0.09, type: "square", vol: 0.32 });
+      } else if (kind === "kick") {                 // heavy "thud" with a crack
+        noise({ dur: 0.16, type: "lowpass", f0: rnd(900, 1200), f1: 200, vol: 0.7 });
+        tone({ f0: rnd(120, 150), f1: 38, dur: 0.22, type: "sine", vol: 0.85 });
+        noise({ dur: 0.04, type: "highpass", f0: 3500, vol: 0.3 });
+      }
+    },
+    jump() { if (started) tone({ f0: 280, f1: 560, dur: 0.12, type: "square", vol: 0.12 }); },
+    land() { if (started) { noise({ dur: 0.07, type: "lowpass", f0: 500, vol: 0.3 }); tone({ f0: 90, f1: 50, dur: 0.08, type: "sine", vol: 0.3 }); } },
+    // Special: rising charge while the pose is held, whoosh when the paper is launched
+    charge() {
+      if (!started) return;
+      tone({ f0: 180, f1: 900, dur: 0.22, type: "sawtooth", vol: 0.16 });
+      tone({ f0: 360, f1: 1800, dur: 0.22, type: "square", vol: 0.07 });
+      noise({ dur: 0.22, f0: 400, f1: 3500, q: 2, vol: 0.14 });
+    },
+    launch() {
+      if (!started) return;
+      noise({ dur: 0.45, type: "bandpass", f0: 2600, f1: 350, q: 1.6, vol: 0.5 });
+      tone({ f0: 520, f1: 90, dur: 0.4, type: "sawtooth", vol: 0.28 });
+      tone({ f0: 1040, f1: 180, dur: 0.3, type: "square", vol: 0.1 });
+    },
+    boom() {
+      if (!started) return;
+      noise({ dur: 0.5, type: "lowpass", f0: 2200, f1: 120, vol: 0.85 });
+      tone({ f0: 200, f1: 28, dur: 0.5, type: "sine", vol: 0.95 });
+      for (let k = 0; k < 5; k++)   // crackling paper/fire
+        noise({ dur: 0.05, type: "highpass", f0: 3000, vol: 0.25, t: ac.currentTime + 0.05 + k * rnd(0.04, 0.09) });
+    },
+    ko() {
+      if (!started) return;
+      [392, 330, 262, 196].forEach((f, k) => tone({ f0: f, dur: 0.3, type: "square", vol: 0.2, t: ac.currentTime + k * 0.17 }));
+      tone({ f0: 98, f1: 40, dur: 0.9, type: "sawtooth", vol: 0.3, t: ac.currentTime + 0.68 });
+    },
+    shout(text) {                                    // optional voice for the special move
+      if (!started || !musicOn || !("speechSynthesis" in window)) return;
+      try {
+        speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.lang = "es-ES"; u.rate = 1.05; u.pitch = 0.5; u.volume = 1;
+        speechSynthesis.speak(u);
+      } catch (e) { /* speech not available */ }
+    },
+  };
+})();
+
+// ---------------------------------------------------------------------------------------------
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const keys = new Set();
+let debugBoxes = false;
+let bg = null, sheetSource = null;   // sheetSource = keyed canvas (or the raw image as fallback)
+let projectiles = [], particles = [], shake = 0, koPlayed = false;
+
+// ---- visual effects --------------------------------------------------------------------------
+const rand = (a, b) => a + Math.random() * (b - a);
+function burst(x, y, n, colors, speed, kind = "spark") {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2), s = rand(speed * 0.3, speed);
+    particles.push({ kind, x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 1, g: kind === "paper" ? 0.12 : 0.05,
+                     life: 0, max: rand(14, 30), size: rand(2, 6), rot: rand(0, 6.28), vr: rand(-0.3, 0.3),
+                     color: colors[(Math.random() * colors.length) | 0] });
+  }
+}
+function updateParticles() {
+  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += p.g; p.rot += p.vr; p.life++; }
+  particles = particles.filter(p => p.life < p.max);
+  if (shake > 0) shake--;
+}
+function drawParticles() {
+  ctx.save();
+  for (const p of particles) {
+    const k = 1 - p.life / p.max;
+    ctx.globalAlpha = k;
+    ctx.fillStyle = p.color;
+    if (p.kind === "paper") {                       // torn scraps of the burning law
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillRect(-p.size, -p.size * 0.6, p.size * 2, p.size * 1.2); ctx.restore();
+    } else {
+      ctx.globalCompositeOperation = "lighter";
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size * k + 1, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+
+// ---- projectile: the flaming paper from pose 9 ---------------------------------------------------
+class Projectile {
+  constructor(owner, x, y, facing) {
+    this.owner = owner; this.x = x; this.y = y; this.facing = facing;
+    this.vx = facing * SPECIAL.speed; this.life = SPECIAL.life; this.age = 0; this.alive = true;
+  }
+  box() { const b = SPECIAL.box; return { x: this.x - b.w / 2, y: this.y - b.h / 2, w: b.w, h: b.h }; }
+  update() {
+    this.x += this.vx; this.age++; this.life--;
+    // embers trailing behind the paper
+    for (let i = 0; i < 2; i++) {
+      particles.push({ kind: "spark", x: this.x - this.facing * rand(30, 55), y: this.y + rand(-14, 14),
+                       vx: -this.facing * rand(0.5, 2.5), vy: rand(-1.2, 0.4), g: -0.02, life: 0, max: rand(10, 20),
+                       size: rand(2, 5), rot: 0, vr: 0, color: ["#ffb02e", "#ff6a1a", "#ffe08a"][(Math.random() * 3) | 0] });
+    }
+    if (this.life <= 0 || this.x < -100 || this.x > W + 100) this.alive = false;
+  }
+  draw() {
+    const r = SCROLL;
+    ctx.save();
+    ctx.translate(Math.round(this.x), Math.round(this.y + Math.sin(this.age * 0.5) * 2));
+    ctx.rotate(Math.sin(this.age * 0.35) * 0.05);
+    ctx.scale(this.facing * SCROLL_SCALE, SCROLL_SCALE);
+    ctx.shadowColor = "rgba(255,150,40,.95)"; ctx.shadowBlur = 26;
+    ctx.drawImage(sheetSource, r.x, r.y, r.w, r.h, -r.w / 2, -r.h / 2, r.w, r.h);
+    ctx.shadowBlur = 0; ctx.globalCompositeOperation = "lighter"; ctx.globalAlpha = 0.3;   // extra glow pass
+    ctx.drawImage(sheetSource, r.x, r.y, r.w, r.h, -r.w / 2, -r.h / 2, r.w, r.h);
+    ctx.restore();
+  }
+}
+
+// ---- fighters -----------------------------------------------------------------------------------
+class Fighter {
+  constructor(name, x, facing, controls, tint) {
+    this.name = name; this.controls = controls; this.tint = tint;
+    this.reset(x, facing);
+  }
+  reset(x, facing) {
+    this.x = x; this.y = FLOOR_Y; this.vx = 0; this.vy = 0;
+    this.facing = facing; this.health = MAX_HEALTH;
+    this.state = "idle"; this.t = 0; this.idleT = 0;
+    this.jumpDir = 0; this.hitDone = false; this.push = 0; this.pushDir = 0;
+  }
+  get airborne() { return this.y < FLOOR_Y; }
+  get hasProjectile() { return projectiles.some(p => p.owner === this && p.alive); }
+  get frameIndex() {
+    switch (this.state) {
+      case "walk":    return 2;
+      case "jump":    return 3;
+      case "fall":    return 4;
+      case "punch":   return ATTACKS.punch.frame;
+      case "kick":    return ATTACKS.kick.frame;
+      case "special": return SPECIAL.frame;          // pose 9
+      case "hit":     return 0;
+      default:        return Math.floor(this.idleT / IDLE_HOLD) % 2;   // frames 1 & 2 alternate
+    }
+  }
+  setState(s) { this.state = s; this.t = 0; this.hitDone = false; if (s === "idle") this.idleT = 0; }
+  hurtbox() { return { x: this.x - HURT.w / 2, y: this.y - HURT.h, w: HURT.w, h: HURT.h }; }
+  hitbox() {
+    const a = ATTACKS[this.state];
+    if (!a || this.t <= a.startup || this.t > a.startup + a.active) return null;
+    const b = a.box;
+    const left = this.facing > 0 ? this.x + b.ox : this.x - b.ox - b.w;
+    return { x: left, y: this.y + b.oy, w: b.w, h: b.h };
+  }
+
+  update(opp) {
+    const c = this.controls, left = keys.has(c.left), right = keys.has(c.right);
+    const dir = (right ? 1 : 0) - (left ? 1 : 0);
+    const prevX = this.x;
+    this.t++; this.idleT++;
+    if (this.health <= 0 && this.state !== "hit") this.state = "idle";
+
+    switch (this.state) {
+      case "idle": case "walk":
+        if (this.health <= 0 || opp.health <= 0) { this.state = "idle"; break; }  // round over
+        if (keys.has(c.special) && !this.hasProjectile) {
+          this.setState("special"); Sound.charge(); Sound.shout("¡Ley de Vivienda!");
+        } else if (keys.has(c.kick))  { this.setState("kick");  Sound.swing("kick"); }
+        else if (keys.has(c.punch))   { this.setState("punch"); Sound.swing("punch"); }
+        else if (keys.has(c.up))    { this.vy = JUMP_V; this.jumpDir = dir; this.setState("jump"); Sound.jump(); }
+        else {
+          this.x += dir * WALK_SPEED;
+          if (dir) { if (this.state !== "walk") this.setState("walk"); }
+          else if (this.state !== "idle") this.setState("idle");
+        }
+        break;
+      case "jump": case "fall":
+        this.vy += GRAVITY; this.y += this.vy; this.x += this.jumpDir * WALK_SPEED;
+        if (this.y >= FLOOR_Y) { this.y = FLOOR_Y; this.vy = 0; this.jumpDir = 0; this.setState("idle"); Sound.land(); }
+        else if (this.vy >= 0 && this.state === "jump") this.setState("fall");
+        break;
+      case "punch": case "kick": {
+        const a = ATTACKS[this.state];
+        if (this.t >= a.startup + a.active + a.recovery) this.setState("idle");
+        break;
+      }
+      case "special":
+        if (this.t === SPECIAL.startup) {            // release the flaming paper
+          projectiles.push(new Projectile(this, this.x + this.facing * SPECIAL.spawnX, this.y + SPECIAL.spawnY, this.facing));
+          Sound.launch();
+          burst(this.x + this.facing * SPECIAL.spawnX, this.y + SPECIAL.spawnY, 14, ["#ffd36b", "#ff8a1f", "#fff"], 5);
+        }
+        if (this.t >= SPECIAL.startup + SPECIAL.recovery) this.setState("idle");
+        break;
+      case "hit":
+        if (this.airborne) {                       // keep falling if hit in the air
+          this.vy += GRAVITY; this.y += this.vy;
+          if (this.y >= FLOOR_Y) { this.y = FLOOR_Y; this.vy = 0; }
+        }
+        if (this.t >= HITSTUN) this.setState(this.airborne ? "fall" : "idle");
+        break;
+    }
+
+    if (this.push > 0) { const s = Math.min(4, this.push); this.x += this.pushDir * s; this.push -= s; }
+
+    // Fighters cannot overlap while both are on the ground
+    if (!this.airborne && !opp.airborne && Math.abs(this.x - opp.x) < HURT.w) {
+      this.x = opp.x + (prevX >= opp.x ? 1 : -1) * HURT.w;
+    }
+    this.x = Math.min(Math.max(this.x, HURT.w / 2), W - HURT.w / 2);
+
+    // Face the opponent whenever both are on the floor and not mid-attack
+    if (["idle", "walk"].includes(this.state) && !this.airborne && !opp.airborne && opp.x !== this.x) {
+      this.facing = opp.x > this.x ? 1 : -1;
+    }
+  }
+
+  takeHit(damage, push, fromX) {
+    this.health = Math.max(0, this.health - damage);
+    this.push = push; this.pushDir = this.x >= fromX ? 1 : -1;
+    this.setState("hit");
+  }
+
+  // Called after both fighters updated, so simultaneous hits trade.
+  resolveHit(opp) {
+    const hb = this.hitbox();
+    if (!hb || this.hitDone) return;
+    const hu = opp.hurtbox();
+    if (overlap(hb, hu)) {
+      this.hitDone = true;                         // one hit per attack
+      const a = ATTACKS[this.state], kind = this.state;
+      opp.takeHit(a.damage, a.push, this.x);
+      Sound.hit(kind);
+      const cx = (hb.x + hb.w / 2 + hu.x + hu.w / 2) / 2, cy = hb.y + hb.h / 2;
+      burst(cx, cy, kind === "kick" ? 16 : 10, ["#fff", "#ffe27a", "#ff9a3c"], kind === "kick" ? 7 : 5);
+      if (kind === "kick") shake = 8;
+    }
+  }
+}
+
+function overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+const p1 = new Fighter("JUGADOR 1", 300, 1,  { left: "KeyA", right: "KeyD", up: "KeyW", punch: "KeyF", kick: "KeyG", special: "KeyH" }, "none");
+const p2 = new Fighter("JUGADOR 2", 724, -1, { left: "ArrowLeft", right: "ArrowRight", up: "ArrowUp", punch: "KeyK", kick: "KeyL", special: "Semicolon" }, "hue-rotate(150deg) saturate(1.3)");
+const fighters = [p1, p2];
+
+function restart() { p1.reset(300, 1); p2.reset(724, -1); projectiles = []; particles = []; koPlayed = false; shake = 0; }
+
+// ---------------------------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------------------------
+function drawFighter(f) {
+  const fr = FRAMES[f.frameIndex];
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,.35)";               // soft floor shadow
+  ctx.beginPath(); ctx.ellipse(f.x, FLOOR_Y + 2, 46, 7, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.translate(Math.round(f.x), Math.round(f.y));
+  ctx.scale(f.facing * SCALE, SCALE);                 // negative x-scale mirrors around the feet
+  if (f.tint !== "none") ctx.filter = f.tint;
+  if (f.state === "hit" && f.t % 4 < 2) ctx.globalAlpha = 0.6;   // hit flicker
+  if (f.state === "special") { ctx.shadowColor = "rgba(255,170,60,.9)"; ctx.shadowBlur = 24; }   // charge glow
+  ctx.drawImage(sheetSource, fr.x, fr.y, fr.w, fr.h, -fr.ax, -fr.fy, fr.w, fr.h);
+  ctx.restore();
+}
+
+function drawHealthBar(f, side) {
+  const barW = 400, barH = 26, margin = 28, top = 24;
+  const x = side === 0 ? margin : W - margin - barW;
+  const pct = f.health / MAX_HEALTH;
+  ctx.save();
+  ctx.fillStyle = "#111"; ctx.fillRect(x - 4, top - 4, barW + 8, barH + 8);
+  ctx.fillStyle = "#6b0f12"; ctx.fillRect(x, top, barW, barH);
+  ctx.fillStyle = pct > 0.5 ? "#f2c230" : pct > 0.25 ? "#f08a1c" : "#e03030";
+  const w = barW * pct;
+  ctx.fillRect(side === 0 ? x : x + barW - w, top, w, barH);   // P2 drains toward the right edge
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2; ctx.strokeRect(x - 4, top - 4, barW + 8, barH + 8);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 20px system-ui, sans-serif"; ctx.textBaseline = "top";
+  ctx.shadowColor = "#000"; ctx.shadowBlur = 4;
+  ctx.textAlign = side === 0 ? "left" : "right";
+  ctx.fillText(`${f.name}  ${f.health}`, side === 0 ? x : x + barW, top + barH + 10);
+  ctx.restore();
+}
+
+function drawBoxes() {
+  ctx.save(); ctx.lineWidth = 2;
+  for (const f of fighters) {
+    const hu = f.hurtbox(); ctx.strokeStyle = "#00e000"; ctx.strokeRect(hu.x, hu.y, hu.w, hu.h);
+    const hb = f.hitbox();  if (hb) { ctx.strokeStyle = "#ff2020"; ctx.strokeRect(hb.x, hb.y, hb.w, hb.h); }
+  }
+  ctx.strokeStyle = "#ffe000";
+  for (const p of projectiles) { const b = p.box(); ctx.strokeRect(b.x, b.y, b.w, b.h); }
+  ctx.restore();
+}
+
+function drawCenterText(lines) {
+  ctx.save();
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(0, H / 2 - 70, W, 130);
+  ctx.textAlign = "center"; ctx.fillStyle = "#fff";
+  ctx.font = "bold 52px system-ui, sans-serif"; ctx.fillText(lines[0], W / 2, H / 2 - 20);
+  ctx.font = "22px system-ui, sans-serif"; ctx.fillText(lines[1], W / 2, H / 2 + 28);
+  ctx.restore();
+}
+
+function drawHud() {
+  ctx.save();
+  ctx.font = "14px system-ui, sans-serif"; ctx.textBaseline = "bottom"; ctx.shadowColor = "#000"; ctx.shadowBlur = 4;
+  if (!Sound.started) {
+    ctx.textAlign = "center"; ctx.fillStyle = "#ffe27a"; ctx.font = "bold 18px system-ui, sans-serif";
+    ctx.fillText("🔊 Pulsa cualquier tecla para activar el sonido y la música", W / 2, H - 14);
+  } else {
+    ctx.textAlign = "right"; ctx.fillStyle = "#fff";
+    const src = Sound.usingFile ? "pista" : "tema integrado";
+    ctx.fillText(Sound.musicOn ? `♪ ${src}: ON (M)` : `♪ ${src}: OFF (M)`, W - 12, H - 10);
+  }
+  ctx.restore();
+}
+
+function render() {
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-shake, shake) * 0.6, rand(-shake, shake) * 0.6);
+  if (bg) ctx.drawImage(bg, 0, 0, W, H); else { ctx.fillStyle = "#2a1c24"; ctx.fillRect(0, 0, W, H); }
+  [...fighters].sort((a, b) => b.y - a.y).forEach(drawFighter);   // airborne fighter on top
+  projectiles.forEach(p => p.draw());
+  drawParticles();
+  ctx.restore();
+  drawHealthBar(p1, 0); drawHealthBar(p2, 1);
+  if (debugBoxes) drawBoxes();
+  if (p1.health <= 0 || p2.health <= 0) {
+    const winner = p1.health <= 0 && p2.health <= 0 ? "EMPATE" : (p2.health <= 0 ? p1.name : p2.name) + " GANA";
+    drawCenterText(["K.O. — " + winner, "Pulsa R para reiniciar"]);
+  }
+  drawHud();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Loop: fixed 60 updates/s, render once per frame
+// ---------------------------------------------------------------------------------------------
+function update() {
+  fighters[0].update(fighters[1]);
+  fighters[1].update(fighters[0]);
+  p1.resolveHit(p2);
+  p2.resolveHit(p1);
+
+  for (const p of projectiles) {                   // flaming papers
+    p.update();
+    if (!p.alive) continue;
+    const target = p.owner === p1 ? p2 : p1;       // never hurts its owner
+    const box = p.box();
+    if (overlap(box, target.hurtbox())) {
+      p.alive = false;
+      target.takeHit(SPECIAL.damage, SPECIAL.push, p.x);
+      Sound.boom();
+      burst(p.x, p.y, 26, ["#ffd36b", "#ff7a1a", "#fff"], 8);
+      burst(p.x, p.y, 18, ["#f4ead2", "#e8d9b0", "#c9b88a"], 6, "paper");   // shredded paper
+      shake = 14;
+    }
+  }
+  projectiles = projectiles.filter(p => p.alive);
+  updateParticles();
+
+  if (!koPlayed && (p1.health <= 0 || p2.health <= 0)) { koPlayed = true; Sound.ko(); shake = 16; }
+}
+
+let last = performance.now(), acc = 0;
+function frame(now) {
+  acc += Math.min((now - last) / 1000, 0.25); last = now;
+  let steps = 0;
+  while (acc >= STEP && steps < MAX_STEPS) { update(); acc -= STEP; steps++; }
+  if (acc >= STEP) acc = 0;                       // fell behind: drop the excess
+  render();
+  requestAnimationFrame(frame);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Input (the first key press or click also unlocks audio, as browsers require)
+// ---------------------------------------------------------------------------------------------
+const GAME_KEYS = new Set(["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Space", "Enter"]);
+
+// Real fullscreen (browsers only allow it from a key press or click)
+function toggleFullscreen() {
+  try {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else (document.documentElement.requestFullscreen || document.documentElement.webkitRequestFullscreen)
+           .call(document.documentElement);
+  } catch (err) { console.warn("Pantalla completa no disponible:", err.message); }
+}
+let autoFullscreenTried = false;
+function autoFullscreen() {                        // enter fullscreen on the very first key press or click
+  if (autoFullscreenTried) return;
+  autoFullscreenTried = true;
+  if (!document.fullscreenElement) toggleFullscreen();
+}
+document.getElementById("fs").addEventListener("click", e => { e.stopPropagation(); toggleFullscreen(); });
+canvas.addEventListener("dblclick", toggleFullscreen);
+
+addEventListener("keydown", e => {
+  Sound.init();
+  if (GAME_KEYS.has(e.code)) e.preventDefault();
+  if (e.code === "Enter" && !e.repeat) toggleFullscreen(); else autoFullscreen();
+  if (e.code === "KeyM" && !e.repeat) Sound.toggleMusic();
+  if (e.code === "KeyB" && !e.repeat) debugBoxes = !debugBoxes;
+  if (e.code === "KeyR" && !e.repeat) restart();
+  keys.add(e.code);
+});
+addEventListener("pointerdown", () => { Sound.init(); autoFullscreen(); });
+addEventListener("keyup", e => keys.delete(e.code));
+addEventListener("blur", () => keys.clear());
+
+// ---------------------------------------------------------------------------------------------
+// Asset loading
+// ---------------------------------------------------------------------------------------------
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("No se pudo cargar " + src));
+    img.src = src;
+  });
+}
+
+// Make the sheet's flat gray background transparent (needs pixel access; see note at the top).
+function keySheet(img) {
+  const c = document.createElement("canvas");
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const cx = c.getContext("2d");
+  cx.drawImage(img, 0, 0);
+  try {
+    const data = cx.getImageData(0, 0, c.width, c.height), d = data.data;
+    const r0 = d[0], g0 = d[1], b0 = d[2];
+    for (let i = 0; i < d.length; i += 4) {
+      if (Math.abs(d[i] - r0) <= KEY_TOLERANCE && Math.abs(d[i + 1] - g0) <= KEY_TOLERANCE &&
+          Math.abs(d[i + 2] - b0) <= KEY_TOLERANCE) d[i + 3] = 0;
+    }
+    cx.putImageData(data, 0, 0);
+    return c;
+  } catch (err) {                                   // file:// -> tainted canvas
+    console.warn("Fondo gris no eliminado (sirve la carpeta con un servidor local):", err.message);
+    return img;
+  }
+}
+
+function showError(msg) {
+  ctx.fillStyle = "#200"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#fff"; ctx.font = "22px system-ui, sans-serif"; ctx.textAlign = "center";
+  ctx.fillText(msg, W / 2, H / 2 - 10);
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillText("Comprueba que index.html está junto a la carpeta assets/", W / 2, H / 2 + 24);
+}
+
+Promise.all([loadImage(BG_SRC), loadImage(SHEET_SRC)])
+  .then(([bgImg, sh]) => {
+    bg = bgImg; sheetSource = keySheet(sh);
+    requestAnimationFrame(t => { last = t; frame(t); });
+  })
+  .catch(err => showError(err.message));
+</script>
+</body>
+</html>
