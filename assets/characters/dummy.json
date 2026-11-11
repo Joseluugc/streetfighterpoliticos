@@ -1,0 +1,53 @@
+{
+  "name": "dummy",
+  "sheet": "assets/characters/dummy.png",
+  "background": "assets/background.png",
+  "background_tolerance": 28,
+  "sprite_scale": 0.72,
+  "frames": [
+    {"x": 43,  "y": 23,  "w": 161, "h": 277, "anchor_x": 82,  "foot_y": 277},
+    {"x": 245, "y": 44,  "w": 156, "h": 253, "anchor_x": 87,  "foot_y": 253},
+    {"x": 431, "y": 46,  "w": 158, "h": 247, "anchor_x": 117, "foot_y": 247},
+    {"x": 610, "y": 19,  "w": 155, "h": 248, "anchor_x": 77,  "foot_y": 248},
+    {"x": 765, "y": 79,  "w": 238, "h": 217, "anchor_x": 119, "foot_y": 217},
+    {"x": 30,  "y": 318, "w": 201, "h": 239, "anchor_x": 89,  "foot_y": 239},
+    {"x": 256, "y": 318, "w": 206, "h": 239, "anchor_x": 51,  "foot_y": 239},
+    {"x": 462, "y": 335, "w": 148, "h": 222, "anchor_x": 100, "foot_y": 222},
+    {"x": 644, "y": 331, "w": 210, "h": 226, "anchor_x": 110, "foot_y": 226}
+  ],
+  "projectile_sprite": {"x": 855, "y": 356, "w": 135, "h": 70},
+  "animations": {
+    "IDLE": [0, 1],
+    "WALKING": [2],
+    "JUMPING": [3],
+    "FALLING": [4],
+    "PUNCHING": [5],
+    "KICKING": [6],
+    "DEFENDING": [7],
+    "SPECIAL": [8],
+    "HIT_STUN": [0]
+  },
+  "idle_frame_hold": 30,
+  "walk_speed": 4,
+  "jump_velocity": -14,
+  "gravity": 0.7,
+  "hurtbox": {"w": 80, "h": 190, "offset_x": -40, "offset_y": -190},
+  "attacks": {
+    "PUNCH": {"startup": 4, "active": 3, "recovery": 8, "damage": 5, "knockback": 16,
+              "box": {"w": 70, "h": 40, "offset_x": 30, "offset_y": -150}},
+    "KICK": {"startup": 7, "active": 4, "recovery": 12, "damage": 8, "knockback": 24,
+             "box": {"w": 100, "h": 45, "offset_x": 30, "offset_y": -95}}
+  },
+  "special": {
+    "startup": 12,
+    "recovery": 18,
+    "projectile": {
+      "speed": 9, "lifetime": 90, "damage": 10, "knockback": 20,
+      "box": {"w": 70, "h": 45},
+      "spawn_offset": {"x": 80, "y": -140}
+    }
+  },
+  "hitstun": 15,
+  "blockstun": 8,
+  "max_health": 100
+}
