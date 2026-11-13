@@ -80,7 +80,7 @@ def test_special_is_stronger_than_basics_and_not_clashable(definition):
     atk = definition["attacks"]
     assert atk["special"]["damage"] >= 2 * atk["kick"]["damage"] > 2 * atk["punch"]["damage"] * 0.6
     assert atk["special"]["clash"] is False
-    assert definition["special"] == {"name": "Golpe Español", "kind": "melee", "airOk": True, "impactReach": 110}
+    assert definition["special"] == {"name": "Golpe Español", "kind": "melee", "impactReach": 110}
     assert sum(definition["animations"]["special"]["ticks"]) == 52
 
 

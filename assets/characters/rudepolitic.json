@@ -2,7 +2,7 @@
   "id": "rudepolitic",
   "name": "Rude Politic",
   "sheet": "assets/characters/rudepolitic.png",
-  "source": "assets/rudepolitic.png (regenerate with scripts/build_rudepolitic_atlas.py)",
+  "source": "assets/rudepolitic.png (regenerate with scripts/build_character_atlas.py rudepolitic)",
   "keyed": true,
   "scale": 0.95,
   "frames": [
@@ -378,7 +378,6 @@
   "special": {
     "name": "Golpe Español",
     "kind": "melee",
-    "airOk": true,
     "impactReach": 110
   }
 }

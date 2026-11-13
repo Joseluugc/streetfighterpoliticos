@@ -37,4 +37,9 @@ window.ROSTER = [
     bio: "Enorme, peludo y con muy mal despertar. No negocia: aplasta enmiendas, y a quien las defienda, con la bandera en alto.",
     stats: { speed: 2, power: 5, health: 4 }, tint: "none", portrait: null,
     sprite: "assets/characters/rudepolitic.json", special: "Golpe Español" },
+
+  { id: "gestora", name: "La Gestora", title: "Sabe gestionar hasta lo que huele mal",
+    bio: "Ejecutiva implacable, traje azul marino y tacones de combate. Cuando la reunión se tuerce, lanza la gestión contra el rival: cae en parábola y estalla al tocar el suelo.",
+    stats: { speed: 4, power: 3, health: 3 }, tint: "none", portrait: null,
+    sprite: "assets/characters/gestora.json", special: "Gestión de Mierda" },
 ];

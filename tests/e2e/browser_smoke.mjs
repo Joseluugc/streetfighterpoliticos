@@ -65,7 +65,9 @@ await run(`window.T = {
 
 // ---- 1. roster / select screen --------------------------------------------------------------------
 check("select screen is active at load", await run("CharacterSelect.active === true"));
-check("roster has 5 fighters incl. Rude Politic", same(await run("ROSTER.map(r => r.id)"), ["dummy", "ministra", "portavoz", "presidente", "rudepolitic"]));
+check("roster has 6 fighters incl. Rude Politic and La Gestora", same(await run("ROSTER.map(r => r.id)"), ["dummy", "ministra", "portavoz", "presidente", "rudepolitic", "gestora"]));
+check("select screen shows 6 tiles", (await run("document.querySelectorAll('.cs__tile').length")) === 6);
+check("La Gestora definition loaded (27 frames, grenade special)", await run("!!CHAR_DEFS.gestora && CHAR_DEFS.gestora.sprite.frames.length === 27 && CHAR_DEFS.gestora.special.kind === 'grenade'"));
 check("character definition loaded", await run("!!CHAR_DEFS.rudepolitic && CHAR_DEFS.rudepolitic.sprite.frames.length === 26"));
 check("panel shows 'Golpe Español' after navigating to it", await (async () => {
   await run(`(() => { const k = (code) => dispatchEvent(new KeyboardEvent("keydown", { code, bubbles: true })); k("KeyS"); k("KeyS"); })()`);
@@ -157,6 +159,98 @@ await run("T.begin('rudepolitic', 'dummy'); T.near(110); p1.health = p1.stats.he
 // move would cancel both (hp stays 100); the slam must land instead.
 await run("T.press('KeyH'); T.tick(21); T.press('KeyK'); T.tick(20)");
 check("special: not clashable by a simultaneous punch (still lands)", (await run("p2.health")) === 74, `hp=${await run("p2.health")}`);
+
+// ---- 7. La Gestora: basics, punch/kick timing, and "Gestión de Mierda" (grenade) -------------------------
+const GR = "gestora";
+await run(`T.begin('${GR}', 'dummy'); T.far();`);
+check("La Gestora: stats 4/3/3 -> speed x1.1, damage x1.0, 100 HP", await run("Math.abs(p1.stats.speed - 1.1) < 1e-9 && p1.stats.damage === 1 && p1.health === 100"));
+const gIdle = await run("T.tick(65, () => T.fi(p1))");
+check("La Gestora idle alternates stance frames 6/11 every 30 updates", gIdle[0] === 6 && gIdle[29] === 11 && gIdle[59] === 6, JSON.stringify(gIdle.slice(0, 3)));
+await run("keys.add('KeyD')");
+const gWalk = await run("T.tick(36, () => T.fi(p1))");
+await run("keys.clear(); T.tick(2)");
+check("La Gestora walk plays frames 0..5, 6 updates each", gWalk.every((v, i) => v === Math.floor(i / 6)), JSON.stringify(gWalk));
+check("La Gestora returns to idle after walking", (await run("p1.state")) === "idle");
+
+for (const [move, key, total, a0, a1, peak, dmg] of [["punch", "KeyF", 20, 7, 10, 8, 8], ["kick", "KeyG", 25, 9, 13, 13, 11]]) {
+  await run(`T.begin('${GR}', 'dummy'); T.far();`);
+  await run(`T.press('${key}')`);
+  const seq = await run("T.tick(40, () => [p1.state, p1.t, !!p1.hitbox(), T.fi(p1)])");
+  const states = seq.filter(s => s[0] === move).length + 1;
+  check(`La Gestora ${move}: lasts exactly ${total} updates then idle`, states === total && seq[total - 1][0] === "idle", `states=${states}`);
+  const active = seq.filter(s => s[2]).map(s => s[1]);
+  check(`La Gestora ${move}: hitbox only on updates ${a0}-${a1}`, same(active, Array.from({ length: a1 - a0 + 1 }, (_, i) => a0 + i)), JSON.stringify(active));
+  check(`La Gestora ${move}: extension frame ${peak} shown while active`, seq.filter(s => s[2]).some(s => s[3] === peak));
+  await run(`T.begin('${GR}', 'dummy'); T.near(130); p2.health = 100;`);
+  await run(`T.press('${key}')`); await run("T.tick(40)");
+  check(`La Gestora ${move}: connects once for ${dmg} damage`, (await run("p2.health")) === 100 - dmg, `hp=${await run("p2.health")}`);
+}
+
+// Throw: P1 faces right, opponent far. Sample every update: [state, t, grenades, blasts, gx, gy, bx, by, frame, p2hp, shards]
+const SAMPLE = `() => [p1.state, p1.t, grenades.length, blasts.length, grenades[0] ? grenades[0].x : null, grenades[0] ? grenades[0].y : null,
+  blasts[0] ? blasts[0].x : null, blasts[0] ? blasts[0].y : null, T.fi(p1), p2.health, particles.filter(p => p.kind === "poop").length]`;
+await run(`T.begin('${GR}', 'dummy'); T.far(); p1.facing = 1; T.press('KeyH');`);
+const thr = await run(`T.tick(150, ${SAMPLE})`);
+const k = thr.findIndex(s => s[2] === 1);                       // first update with a grenade in the air
+check("throw: grenade appears on the throwing-pose update (t=34, frame 25) and not before", k > 0 && thr[k][1] === 34 && thr[k][8] === 25 && thr[k - 1][2] === 0, `k=${k} t=${thr[k] && thr[k][1]} frame=${thr[k] && thr[k][8]}`);
+check("special: 52 updates long, then idle (not stuck)", thr.findIndex(s => s[0] === "idle") === 51, `idle at ${thr.findIndex(s => s[0] === "idle")}`);
+const flight = thr.filter(s => s[2] === 1 && s[4] !== null);
+const vx = 11 * Math.cos(40 * Math.PI / 180), g = 0.42;
+check("parabola: constant horizontal speed (11 px/update at 40 deg)", flight.length > 40 && flight.slice(1).every((s, i) => Math.abs((s[4] - flight[i][4]) - vx) < 1e-6));
+check("parabola: constant gravity (second difference of y = 0.42 px/update^2)", flight.slice(2).every((s, i) => Math.abs((s[5] - 2 * flight[i + 1][5] + flight[i][5]) - g) < 1e-6));
+const apex = flight.reduce((m, s, i) => (s[5] < flight[m][5] ? i : m), 0);
+check("parabola: rises, peaks, then falls (apex strictly inside the flight)", apex > 0 && apex < flight.length - 1 && flight[0][5] > flight[apex][5] && flight[flight.length - 1][5] > flight[apex][5]);
+check("spawn: from the hand (x = 200 + 84 + one update of flight), y = 370 - 11 sin40 + g/2", Math.abs(flight[0][4] - (284 + vx)) < 1e-6 && Math.abs(flight[0][5] - (370 - 11 * Math.sin(40 * Math.PI / 180) + g / 2)) < 1e-6, JSON.stringify(flight[0]));
+check("never passes through the floor while in flight", flight.every(s => s[5] < 520));
+const landing = thr.find(s => s[3] === 1);
+check("explodes exactly once on the floor (blast at y = FLOOR_Y)", thr.filter((s, i) => s[3] === 1 && (i === 0 || thr[i - 1][3] === 0)).length === 1 && landing[7] === 520, JSON.stringify(landing));
+check("the grenade is gone after the blast; blast and shards are cleaned up", thr[thr.length - 1][2] === 0 && thr[thr.length - 1][3] === 0 && thr[thr.length - 1][10] === 0);
+const shardCount = thr.find(s => s[3] === 1)[10];
+check("explosion scatters 9 shards", shardCount === 9, `shards=${shardCount}`);
+check("no area damage when the opponent is outside the blast radius", thr[thr.length - 1][9] === 100, `hp=${thr[thr.length - 1][9]}`);
+
+// Facing left mirrors the arc
+await run(`T.begin('${GR}', 'dummy'); p1.x = 700; p2.x = 200; p1.facing = -1; T.press('KeyH');`);
+const left = await run(`T.tick(40, ${SAMPLE})`);
+const li = left.findIndex(s => s[2] === 1), lf = left.filter(s => s[2] === 1);
+check("facing left: the grenade starts at 700 - 84 and flies left", li > 0 && Math.abs(lf[0][4] - (616 - vx)) < 1e-6 && lf[1][4] < lf[0][4], JSON.stringify(lf[0]));
+
+// Area of effect: opponent placed in the blast radius -> one hit, exactly 16 damage, and it sticks
+const blastX = landing[6];
+await run(`T.begin('${GR}', 'dummy'); p1.x = 200; p2.x = ${Math.round(blastX) + 90}; p2.health = 100; T.press('KeyH');`);
+const aoe = await run(`T.tick(150, ${SAMPLE})`);
+check("area damage: opponent inside the blast radius takes 16 once (power x1.0)", (await run("p2.health")) === 84 && aoe.filter((s, i) => s[3] === 1 && (i === 0 || aoe[i - 1][3] === 0)).length === 1, `hp=${await run("p2.health")}`);
+check("area damage: the thrower is never hurt by its own grenade", (await run("p1.health")) === 100);
+await run(`T.begin('${GR}', 'dummy'); p1.x = 200; p2.x = 900; T.press('KeyH');`);
+const shardVx = await run(`(() => { for (let i = 0; i < 300 && !blasts.length; i++) update();
+  return particles.filter(p => p.kind === "poop").map(p => Math.round(p.vx * 100) / 100); })()`);
+check("shards: each has its own path (different horizontal speeds, both directions)",
+  shardVx.length === 9 && new Set(shardVx).size >= 7 && shardVx.some(v => v < 0) && shardVx.some(v => v > 0), JSON.stringify(shardVx));
+check("blast removed after its lifetime", aoe[aoe.length - 1][3] === 0 && aoe[aoe.length - 1][10] === 0);
+
+// Direct hit in mid-air: the opponent stands in the arc -> explodes in the air, still once
+await run(`T.begin('${GR}', 'dummy'); p1.x = 200; p2.x = 560; p2.health = 100; T.press('KeyH');`);
+const midair = await run(`T.tick(150, ${SAMPLE})`);
+const airBlast = midair.find(s => s[3] === 1);
+check("direct hit: explodes in mid-air on the opponent (above the floor), 16 damage once", airBlast && airBlast[7] < 520 && (await run("p2.health")) === 84, JSON.stringify(airBlast));
+
+// Cannot be cancelled while the throw animation plays
+await run(`T.begin('${GR}', 'dummy'); T.far(); T.press('KeyH'); keys.add('KeyW'); keys.add('KeyF'); keys.add('KeyG'); T.tick(20);`);
+check("special: cannot be cancelled into jump/punch/kick", (await run("p1.state === 'special' && p1.y === FLOOR_Y")));
+await run("keys.clear()");
+
+// No second grenade while the first is airborne; a new throw is allowed after it lands
+await run(`T.begin('${GR}', 'dummy'); T.far(); T.press('KeyH'); T.tick(60);`);
+check("one grenade at a time: a new special is ignored while the first is in flight", (await run("grenades.length")) === 1 && (await run("(T.press('KeyH'), p1.state)")) !== "special");
+await run("T.tick(120)");
+await run("T.press('KeyH')");
+check("a new throw is allowed after the previous grenade has exploded", (await run("p1.state")) === "special" && (await run("grenades.length")) === 0);
+
+// screenshots of the grenade in flight and after the blast (debug overlay on: arc, body box, blast radius)
+await run(`T.begin('${GR}', 'dummy'); T.far(); p1.facing = 1; T.press('KeyH'); debugBoxes = true; T.tick(45);`);
+await shot("gestora-flight");
+await run("T.tick(40)"); await shot("gestora-blast");
+await run("debugBoxes = false");
 
 // ---- 6. regressions: default fighters, mirror match, clash -------------------------------------------------
 await run("T.begin('dummy', 'ministra'); T.far();");

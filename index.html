@@ -83,6 +83,7 @@ const SPECIAL = { frame: 8, startup: 12, recovery: 18, spawnX: 80, spawnY: -140,
 //                   { frames:[...],      ticks:[n, n..] } one-shot, per-frame durations
 //            jump: { frames:[takeoff, rise, apex], takeoff:n }, land: { frames:[id], duration:n } }
 //   special.kind: "projectile" (spawns a paper, see SPECIAL) | "melee" (attack-table entry "special")
+//                 | "grenade" (a thrown poop in a parabolic arc that explodes on the floor, see Grenade)
 const DEFAULT_CHAR = {
   id: "default",
   sprite: {
@@ -91,7 +92,7 @@ const DEFAULT_CHAR = {
              punch: { frames: [5] }, kick: { frames: [6] }, special: { frames: [8] }, hit: { frames: [0] } },
   },
   hurt: HURT, attacks: ATTACKS,
-  special: { name: "Ley de Vivienda", kind: "projectile", airOk: true },
+  special: { name: "Ley de Vivienda", kind: "projectile" },
 };
 const CHAR_DEFS = { [DEFAULT_CHAR.id]: DEFAULT_CHAR };        // id -> definition (roster ids of loaded characters)
 const charOf = ch => CHAR_DEFS[ch.id] || DEFAULT_CHAR;
@@ -336,7 +337,7 @@ const ctx = canvas.getContext("2d");
 const keys = new Set();
 let debugBoxes = false;
 let bg = null, sheetSource = null;   // sheetSource = keyed canvas (or the raw image as fallback)
-let projectiles = [], particles = [], banners = [], shake = 0, koPlayed = false;
+let projectiles = [], grenades = [], blasts = [], particles = [], banners = [], shake = 0, koPlayed = false;
 
 // ---- visual effects --------------------------------------------------------------------------
 const rand = (a, b) => a + Math.random() * (b - a);
@@ -349,10 +350,15 @@ function burst(x, y, n, colors, speed, kind = "spark") {
   }
 }
 function updateParticles() {
-  for (const p of particles) { p.x += p.vx; p.y += p.vy; p.vy += p.g; p.rot += p.vr; p.life++; }
+  for (const p of particles) {
+    p.x += p.vx; p.y += p.vy; p.vy += p.g; p.rot += p.vr; p.life++;
+    if (p.kind === "poop" && p.y > FLOOR_Y) { p.y = FLOOR_Y; p.vy *= -0.3; p.vx *= 0.7; }   // shards bounce once, then skid to rest
+  }
   particles = particles.filter(p => p.life < p.max);
   for (const b of banners) b.t++;
   banners = banners.filter(b => b.t < b.max);
+  for (const b of blasts) b.t++;
+  blasts = blasts.filter(b => b.t < b.max);
   if (shake > 0) shake--;
 }
 function drawParticles() {
@@ -361,6 +367,14 @@ function drawParticles() {
     const k = 1 - p.life / p.max;
     ctx.globalAlpha = k;
     ctx.fillStyle = p.color;
+    if (p.kind === "poop") {                        // cartoon poop shard: a small copy of the grenade sprite
+      const r = p.rect;
+      ctx.save(); ctx.globalCompositeOperation = "source-over";
+      ctx.translate(Math.round(p.x), Math.round(p.y)); ctx.rotate(p.rot);
+      ctx.drawImage(p.src, r.x, r.y, r.w, r.h, -r.w * p.size / 2, -r.h * p.size / 2, r.w * p.size, r.h * p.size);
+      ctx.restore();
+      continue;
+    }
     if (p.kind === "paper") {                       // torn scraps of the burning law
       ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.rot);
       ctx.fillRect(-p.size, -p.size * 0.6, p.size * 2, p.size * 1.2); ctx.restore();
@@ -368,6 +382,11 @@ function drawParticles() {
       ctx.globalCompositeOperation = "lighter";
       ctx.beginPath(); ctx.arc(p.x, p.y, p.size * k + 1, 0, Math.PI * 2); ctx.fill();
     }
+  }
+  for (const b of blasts) {                         // grenade shockwave: expands to the blast radius, then fades
+    const k = b.t / b.max;
+    ctx.globalAlpha = 1 - k; ctx.strokeStyle = "#ffd36b"; ctx.lineWidth = 2 + 6 * (1 - k);
+    ctx.beginPath(); ctx.arc(b.x, b.y, b.r * (0.2 + 0.8 * k), 0, Math.PI * 2); ctx.stroke();
   }
   ctx.restore();
   for (const b of banners) {                        // move-name banners ("¡GOLPE ESPAÑOL!")
@@ -413,6 +432,64 @@ class Projectile {
   }
 }
 
+// ---- grenade: "Gestión de Mierda" (a poop thrown in a parabolic arc, explodes on the floor) -------------
+// Position is analytic in fixed updates n since the throw:  x = x0 + vx·n,  y = y0 + vy·n + ½·g·n²
+// (y grows downwards). Time is counted in simulation updates, never wall-clock time, so the arc is the
+// same at any frame rate and can be predicted exactly (the debug overlay draws that prediction).
+class Grenade {
+  constructor(owner, cfg, x0, y0, facing, sprite) {
+    const a = cfg.angle * Math.PI / 180;
+    this.owner = owner; this.cfg = cfg; this.sprite = sprite; this.facing = facing;
+    this.x0 = x0; this.y0 = y0; this.x = x0; this.y = y0; this.n = 0; this.alive = true;
+    this.vx = facing * cfg.speed * Math.cos(a);          // launch velocity, px per update
+    this.vy = -cfg.speed * Math.sin(a);                  // negative = upwards
+  }
+  pointAt(n) { return { x: this.x0 + this.vx * n, y: this.y0 + this.vy * n + 0.5 * this.cfg.gravity * n * n }; }
+  advance() { this.n++; const p = this.pointAt(this.n); this.x = p.x; this.y = p.y; }
+  get vyNow() { return this.vy + this.cfg.gravity * this.n; }
+  box() { const b = this.cfg.box; return { x: this.x - b.w / 2, y: this.y - b.h / 2, w: b.w, h: b.h }; }
+}
+
+/** True when a circle (centre cx,cy, radius r) touches an axis-aligned box. */
+function circleHitsBox(cx, cy, r, b) {
+  const nx = Math.max(b.x, Math.min(cx, b.x + b.w)), ny = Math.max(b.y, Math.min(cy, b.y + b.h));
+  return (cx - nx) ** 2 + (cy - ny) ** 2 <= r * r;
+}
+
+/** Bursts every advanced grenade once: on the floor, or on a direct hit with the opponent. (update() advances them.) */
+function updateGrenades() {
+  for (const g of grenades) {
+    if (!g.alive) continue;                                                  // cancelled by a clash this update
+    const target = g.owner === p1 ? p2 : p1;                                 // never hurts its owner
+    if (g.y >= FLOOR_Y) detonate(g, g.x, FLOOR_Y);                           // lands: the arc ends on the floor
+    else if (overlap(g.box(), target.hurtbox())) detonate(g, g.x, g.y);      // hits in mid-air
+  }
+  grenades = grenades.filter(g => g.alive);
+}
+
+/** The blast: one area-of-effect hit for each opponent whose hurtbox is inside the radius. The grenade is
+ *  marked spent first, so it can explode only once. Shards and the shockwave are visual only. */
+function detonate(g, x, y) {
+  const cfg = g.cfg;
+  g.alive = false;
+  for (const f of fighters) {
+    if (f === g.owner || f.health <= 0) continue;
+    if (circleHitsBox(x, y, cfg.blastRadius, f.hurtbox())) f.takeHit(Math.round(cfg.damage * g.owner.stats.damage), cfg.push, x);
+  }
+  blasts.push({ x, y, r: cfg.blastRadius, t: 0, max: cfg.blastLife });
+  const sh = cfg.shards;                                                     // scatter: each shard has its own path
+  for (let i = 0; i < sh.count; i++) {
+    const a = -Math.PI / 2 + rand(-1.3, 1.3), s = rand(sh.speed * 0.5, sh.speed);
+    particles.push({ kind: "poop", x, y: y - 6, vx: Math.cos(a) * s, vy: Math.sin(a) * s, g: sh.gravity, life: 0,
+                     max: rand(sh.life * 0.7, sh.life), size: rand(sh.scale * 0.8, sh.scale * 1.2),
+                     rot: rand(0, 6.28), vr: rand(-0.2, 0.2), src: g.sprite.img, rect: g.sprite.frames[cfg.frame] });
+  }
+  Sound.boom();
+  shake = Math.max(shake, 18);
+  burst(x, y, 30, ["#fff", "#ffd36b", "#ff7a1a"], 8);                       // central flash and sparks
+  burst(x, y, 18, ["#f4ead2", "#e8d9b0", "#8a5a2b"], 6, "paper");          // dust and crumbs
+}
+
 // ---- fighters -----------------------------------------------------------------------------------
 class Fighter {
   constructor(name, x, facing, controls, tint) {
@@ -431,9 +508,20 @@ class Fighter {
   startSpecial() {
     const sp = this.char.special;
     this.setState("special"); Sound.charge(); Sound.shout("¡" + sp.name + "!");
-    if (sp.kind === "melee") banners.push({ text: "¡" + sp.name.toUpperCase() + "!", x: this.x, y: this.y - 250, t: 0, max: 55 });
+    if (sp.kind !== "projectile") banners.push({ text: "¡" + sp.name.toUpperCase() + "!", x: this.x, y: this.y - 250, t: 0, max: 55 });
   }
   touchDown() { Sound.land(); if (this.char.sprite.anims.land) this.landT = this.char.sprite.anims.land.duration || 6; }
+  /** "Gestión de Mierda": the poop leaves the throwing hand. Spawned at least clear of the thrower's own hurtbox. */
+  throwGrenade() {
+    const cfg = this.char.special.grenade, at = cfg.spawn;
+    const dx = Math.max(at.x, this.halfW + cfg.box.w / 2);
+    const g = new Grenade(this, cfg, this.x + this.facing * dx, this.y + at.y, this.facing, this.char.sprite);
+    grenades.push(g);
+    Sound.launch();
+    burst(g.x0, g.y0, 14, ["#ffd36b", "#ff8a1f", "#fff"], 5);
+  }
+  /** Length of the special animation in updates (the special state ends with it). */
+  get specialTotal() { return this.char.sprite.anims.special.ticks.reduce((s, k) => s + k, 0); }
   /** Apply a roster entry (from ui/character-select/roster.js): look + gameplay modifiers. */
   loadout(ch, tintExtra = "") {
     const m = CharacterSelect.statsToMods(ch.stats);
@@ -443,7 +531,14 @@ class Fighter {
     this.char = charOf(ch);
   }
   get airborne() { return this.y < FLOOR_Y; }
-  get hasProjectile() { return projectiles.some(p => p.owner === this && p.alive); }
+  /** Gravity for an attack cast in the air: the fighter keeps the jump's momentum and lands on the floor.
+   *  A no-op on the ground, so ground attacks are unaffected. */
+  airStep() {
+    if (!this.airborne && this.vy === 0) return;
+    this.vy += GRAVITY; this.y += this.vy; this.x += this.jumpDir * WALK_SPEED * this.stats.speed;
+    if (this.y >= FLOOR_Y) { this.y = FLOOR_Y; this.vy = 0; this.jumpDir = 0; this.touchDown(); }
+  }
+  get hasProjectile() { return projectiles.some(p => p.owner === this && p.alive) || grenades.some(g => g.owner === this); }
   get attacks() { return this.char.attacks; }
   /** Sprite frame for the current moment: a pure function of state, tick, vertical speed and landing timer. */
   get frame() {
@@ -490,26 +585,32 @@ class Fighter {
         }
         break;
       case "jump": case "fall":
+        // every attack can be started in the air, same priority as on the ground (special > kick > punch)
+        if (this.health > 0 && opp.health > 0 && keys.has(c.special) && !this.hasProjectile) { this.startSpecial(); break; }
+        if (keys.has(c.kick))  { this.setState("kick");  Sound.swing("kick"); break; }
+        if (keys.has(c.punch)) { this.setState("punch"); Sound.swing("punch"); break; }
+        this.jumpDir = dir;   // air control: horizontal drift follows the keys held this frame
         this.vy += GRAVITY; this.y += this.vy; this.x += this.jumpDir * WALK_SPEED * this.stats.speed;
-        if (this.char.special.airOk && keys.has(c.special) && !this.hasProjectile && this.health > 0 && opp.health > 0) {   // special in mid-air
-          this.startSpecial(); break;
-        }
         if (this.y >= FLOOR_Y) { this.y = FLOOR_Y; this.vy = 0; this.jumpDir = 0; this.setState("idle"); this.touchDown(); }
         else if (this.vy >= 0 && this.state === "jump") this.setState("fall");
         break;
       case "punch": case "kick": {
         const a = this.attacks[this.state];
-        if (this.t >= a.startup + a.active + a.recovery) this.setState("idle");
+        this.airStep();
+        if (this.t >= a.startup + a.active + a.recovery) this.setState(this.airborne ? "fall" : "idle");
         break;
       }
       case "special":
+        if (this.char.special.kind === "grenade") {    // "Gestión de Mierda": the throw starts with the throwing pose
+          if (this.t === this.char.special.launch) this.throwGrenade();
+          this.airStep();
+          if (this.t >= this.specialTotal) this.setState(this.airborne ? "fall" : "idle");
+          break;
+        }
         if (this.char.special.kind === "melee") {      // e.g. "Golpe Español": no projectile, the swing itself is the attack
           const a = this.attacks.special;
           if (this.t === a.startup + 1) slamImpact(this, a);          // flag comes down: effects (hitbox starts now)
-          if (this.airborne || this.vy !== 0) {                       // cast in the air: keep falling, momentum carries on
-            this.vy += GRAVITY; this.y += this.vy; this.x += this.jumpDir * WALK_SPEED * this.stats.speed;
-            if (this.y >= FLOOR_Y) { this.y = FLOOR_Y; this.vy = 0; this.jumpDir = 0; this.touchDown(); }
-          }
+          this.airStep();
           if (this.t >= a.startup + a.active + a.recovery) this.setState(this.airborne ? "fall" : "idle");
           break;
         }
@@ -518,10 +619,7 @@ class Fighter {
           Sound.launch();
           burst(this.x + this.facing * SPECIAL.spawnX, this.y + SPECIAL.spawnY, 14, ["#ffd36b", "#ff8a1f", "#fff"], 5);
         }
-        if (this.airborne || this.vy !== 0) {            // cast in the air: keep falling (momentum carries on)
-          this.vy += GRAVITY; this.y += this.vy; this.x += this.jumpDir * WALK_SPEED * this.stats.speed;
-          if (this.y >= FLOOR_Y) { this.y = FLOOR_Y; this.vy = 0; this.jumpDir = 0; this.touchDown(); }
-        }
+        this.airStep();
         if (this.t >= SPECIAL.startup + SPECIAL.recovery) this.setState(this.airborne ? "fall" : "idle");
         break;
       case "hit":
@@ -590,7 +688,7 @@ function startFight({ p1: c1, p2: c2 }) {
 }
 function showSelect() { screen = "select"; restart(); CharacterSelect.show(); }
 
-function restart() { p1.reset(300, 1); p2.reset(724, -1); projectiles = []; particles = []; banners = []; koPlayed = false; shake = 0; }
+function restart() { p1.reset(300, 1); p2.reset(724, -1); projectiles = []; grenades = []; blasts = []; particles = []; banners = []; koPlayed = false; shake = 0; }
 
 // ---------------------------------------------------------------------------------------------
 // Rendering
@@ -624,6 +722,18 @@ function drawFighter(f) {
   ctx.restore();
 }
 
+/** The thrown poop: tilted along its arc, with the sprite's streak always trailing behind it. */
+function drawGrenade(g) {
+  const r = g.sprite.frames[g.cfg.frame], sc = g.sprite.scale;
+  ctx.save();
+  ctx.translate(Math.round(g.x), Math.round(g.y));
+  ctx.scale(g.facing * sc, sc);
+  ctx.rotate(Math.atan2(g.vyNow, Math.abs(g.vx)));
+  ctx.shadowColor = "rgba(255,150,40,.9)"; ctx.shadowBlur = 16;
+  ctx.drawImage(g.sprite.img, r.x, r.y, r.w, r.h, -r.w / 2, -r.h / 2, r.w, r.h);
+  ctx.restore();
+}
+
 function drawHealthBar(f, side) {
   const barW = 400, barH = 26, margin = 28, top = 24;
   const x = side === 0 ? margin : W - margin - barW;
@@ -650,6 +760,17 @@ function drawBoxes() {
   }
   ctx.strokeStyle = "#ffe000";
   for (const p of projectiles) { const b = p.box(); ctx.strokeRect(b.x, b.y, b.w, b.h); }
+  for (const g of grenades) {                       // grenade body, and its predicted arc down to the floor
+    const b = g.box(); ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.save(); ctx.setLineDash([3, 5]); ctx.strokeStyle = "rgba(255,224,0,.7)"; ctx.beginPath();
+    for (let m = g.n; m < g.n + 240; m++) {
+      const p = g.pointAt(m); if (m === g.n) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+      if (p.y >= FLOOR_Y) break;
+    }
+    ctx.stroke(); ctx.restore();
+  }
+  ctx.strokeStyle = "#ff00ff";                      // area of effect of each live blast
+  for (const b of blasts) { ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2); ctx.stroke(); }
   ctx.restore();
 }
 
@@ -682,6 +803,7 @@ function render() {
   if (bg) ctx.drawImage(bg, 0, 0, W, H); else { ctx.fillStyle = "#2a1c24"; ctx.fillRect(0, 0, W, H); }
   [...fighters].sort((a, b) => b.y - a.y).forEach(drawFighter);   // airborne fighter on top
   projectiles.forEach(p => p.draw());
+  grenades.forEach(drawGrenade);
   drawParticles();
   ctx.restore();
   drawHealthBar(p1, 0); drawHealthBar(p2, 1);
@@ -736,11 +858,13 @@ function resolveMeleeClash(a, b) {
   shake = Math.max(shake, 6);
 }
 
-/** Projectiles from opposite owners that overlap annihilate each other in a big burst. */
-function resolveProjectileClash() {
-  for (let i = 0; i < projectiles.length; i++) {
-    for (let j = i + 1; j < projectiles.length; j++) {
-      const a = projectiles[i], b = projectiles[j];
+/** Long-range specials (papers and grenades) from opposite owners that overlap annihilate each other in a
+ *  big burst. Both kinds share this path: every entry of `projectiles` and `grenades` is one. */
+function resolveLongRangeClash() {
+  const shots = [...projectiles, ...grenades];
+  for (let i = 0; i < shots.length; i++) {
+    for (let j = i + 1; j < shots.length; j++) {
+      const a = shots[i], b = shots[j];
       if (!a.alive || !b.alive || a.owner === b.owner || !overlap(a.box(), b.box())) continue;
       a.alive = b.alive = false;
       const x = (a.x + b.x) / 2, y = (a.y + b.y) / 2;
@@ -760,7 +884,8 @@ function update() {
   p2.resolveHit(p1);
 
   for (const p of projectiles) p.update();         // flaming papers
-  resolveProjectileClash();                        // two papers that meet cancel out
+  for (const g of grenades) g.advance();           // "Gestión de Mierda" arcs
+  resolveLongRangeClash();                         // papers and grenades that meet cancel out
 
   for (const p of projectiles) {
     if (!p.alive) continue;
@@ -776,6 +901,7 @@ function update() {
     }
   }
   projectiles = projectiles.filter(p => p.alive);
+  updateGrenades();                                // "Gestión de Mierda": arc, floor / direct hit, blast
   updateParticles();
 
   if (!koPlayed && (p1.health <= 0 || p2.health <= 0)) { koPlayed = true; Sound.ko(); shake = 16; }
